@@ -33,6 +33,22 @@ impl PathExt for Path {
     }
 }
 
+trait SliceExt {
+    fn natural_sort_unstable(&mut self);
+}
+
+impl<S: AsRef<OsStr>> SliceExt for [S] {
+    fn natural_sort_unstable(&mut self) {
+        self.sort_unstable_by(|a, b| {
+            natord::compare_ignore_case(
+                &a.as_ref().to_string_lossy(),
+                &b.as_ref().to_string_lossy(),
+            )
+        })
+    }
+}
+
+// TODO: change this to use Anyhow.
 #[derive(Debug)]
 enum Error {
     UnsafePattern(String),
@@ -42,7 +58,6 @@ enum Error {
 }
 
 impl std::error::Error for Error {}
-
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use Error::*;
@@ -84,6 +99,10 @@ impl<T> ResultExt<T> for Result<T, std::io::Error> {
 ///    directories: a `Vec` of the files (and only files) in each directory is returned.
 ///    mixed: an error is returned.
 fn get_paths(pattern: &str) -> Result<Vec<Vec<PathBuf>>, Error> {
+    fn should_ignore(p: impl AsRef<Path>) -> bool {
+        p.as_ref().ends_with("desktop.ini")
+    }
+
     let glob_options = glob::MatchOptions {
         case_sensitive: false,
         require_literal_separator: false,
@@ -92,6 +111,7 @@ fn get_paths(pattern: &str) -> Result<Vec<Vec<PathBuf>>, Error> {
 
     let paths = glob::glob_with(pattern, glob_options)
         .map_err(|_| Error::InvalidPattern(pattern.to_string()))?
+        .filter(|r| r.as_ref().map(|p| !should_ignore(p)).unwrap_or(true))
         .collect::<Result<Vec<_>, _>>()?;
 
     let file_types = paths
@@ -103,35 +123,28 @@ fn get_paths(pattern: &str) -> Result<Vec<Vec<PathBuf>>, Error> {
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let mut out: Vec<Vec<PathBuf>> = if file_types.iter().all(|m| m.is_file()) {
-        vec![paths]
+    if file_types.iter().all(|m| m.is_file()) {
+        Ok(vec![paths])
     } else if file_types.iter().all(|m| m.is_dir()) {
         paths
             .into_iter()
             .map(|dir| {
-                Ok(dir
-                    .read_dir()
+                dir.read_dir()
                     .map_renumber_err(|| dir.clone())?
-                    .filter_map(|maybe_entry| match maybe_entry {
-                        Ok(entry) => entry
-                            .file_type()
-                            .map_renumber_err(|| entry.path())
-                            .map(|m| m.is_file().then(|| entry.path()))
-                            .transpose(),
-                        Err(e) => Some(Err(Error::Io(e, dir.clone()))),
+                    .filter_map(|maybe_entry| {
+                        match maybe_entry.map(|entry| (entry.file_type(), entry.path())) {
+                            Ok((Ok(m), p)) if !should_ignore(&p) && m.is_file() => Some(Ok(p)),
+                            Ok((Ok(_), _)) => None,
+                            Ok((Err(e), p)) => Some(Err(Error::Io(e, p))),
+                            Err(e) => Some(Err(Error::Io(e, dir.clone()))),
+                        }
                     })
-                    .collect::<Result<Vec<_>, _>>()?)
+                    .collect()
             })
-            .collect::<Result<Vec<_>, Error>>()?
+            .collect()
     } else {
-        return Err(Error::MixedFileSystemObjects);
-    };
-
-    for dir in &mut out {
-        dir.retain(|p| !p.ends_with("desktop.ini"));
+        Err(Error::MixedFileSystemObjects)
     }
-
-    Ok(out)
 }
 
 /// Returns `true` if the pattern is unsafe, `false` otherwise.
@@ -149,19 +162,14 @@ fn run(pattern: &str) -> Result<usize, Error> {
 
     let mut dirs = get_paths(pattern)?;
     for dir in &mut dirs {
-        dir.sort_unstable_by(|a, b| {
-            natord::compare_ignore_case(
-                &a.as_os_str().to_string_lossy(),
-                &b.as_os_str().to_string_lossy(),
-            )
-        });
+        dir.natural_sort_unstable();
     }
 
     for dir in &dirs {
-        let padding = dir.len().to_string().len();
+        // TODO: use `{int}::log10` when it's stabilized.
+        let padding = (dir.len() as f64).log10().floor() as usize + 1;
         for (n, path) in dir.iter().enumerate() {
-            let new_path = path.with_stem(format!("{:0padding$}", n + 1, padding = padding));
-            path.rename(new_path)?;
+            path.rename(path.with_stem(format!("{:0padding$}", n + 1, padding = padding)))?;
         }
     }
 
