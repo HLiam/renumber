@@ -172,7 +172,10 @@ fn main() {
     match env::args().nth(1).as_deref() {
         None | Some("-h" | "--help") => println!("Usage: renumber [-h] [--help] PATTERN"),
         Some(pattern) => match run(pattern) {
-            Ok(count) => println!("Renumbered {count} files"),
+            Ok(count) => println!(
+                "Renumbered {count} file{}",
+                if count == 1 { "" } else { "s" }
+            ),
             Err(err_msg) => println!("Error: {err_msg}"),
         },
     }
