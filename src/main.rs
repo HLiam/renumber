@@ -184,7 +184,7 @@ fn main() {
                 "Renumbered {count} file{}",
                 if count == 1 { "" } else { "s" }
             ),
-            Err(err_msg) => println!("Error: {err_msg}"),
+            Err(err_msg) => eprintln!("Error: {err_msg}"),
         },
     }
 }
